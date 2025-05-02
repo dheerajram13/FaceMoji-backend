@@ -1,11 +1,11 @@
 from celery import Celery
 from app.core.config import settings
 
-# Create Celery app
+# Create Celery app with explicit Redis configuration
 app = Celery(
     'facemoji_tasks',
-    broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND,
+    broker='redis://redis:6379/0',
+    backend='redis://redis:6379/0',
     include=['app.services.face_processor']
 )
 
@@ -18,5 +18,8 @@ app.conf.update(
     enable_utc=True,
     worker_concurrency=4,  # Number of worker processes
     task_time_limit=300,   # Maximum task execution time in seconds
-    task_soft_time_limit=240  # Soft time limit before task is terminated
+    task_soft_time_limit=240,  # Soft time limit before task is terminated
+    broker_connection_retry_on_startup=True,  # Add retry on startup
+    task_track_started=True,  # Track task start time
+    result_expires=3600  # Results expire after 1 hour
 )

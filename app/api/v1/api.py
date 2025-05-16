@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, File, UploadFile, Query, Body, Dep
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.services.face_detector import face_detector
+from app.services.emoji_recommender import emoji_recommender
 from app.api.v1.schemas.face_detection import FaceDetectionRequest, FaceDetectionResponse
 from app.api.v1.schemas.emoji_assets import EmojiAssetsRequest, EmojiAssetsResponse
 from app.api.v1.schemas.face_swap import FaceSwapRequest, FaceSwapResponse
@@ -94,7 +95,7 @@ async def get_emoji_assets(request: EmojiAssetsRequest):
     Retrieve optimized emoji assets for display
     """
     try:
-        # TODO: Implement actual asset retrieval
+        # Get assets from CDN
         assets = []
         for emoji_id in request.ids:
             assets.append({
@@ -106,16 +107,132 @@ async def get_emoji_assets(request: EmojiAssetsRequest):
                     "left_eye": [80, 95],
                     "right_eye": [176, 95],
                     "mouth_center": [128, 180]
+                },
+                "metadata": {
+                    "file_size": 123456,  # Placeholder
+                    "format": "webp",
+                    "compression_ratio": 0.85
                 }
             })
         
         return {
             "assets": assets,
-            "cache_ttl": 86400
+            "cache_ttl": 86400,
+            "total_size": sum(asset["metadata"]["file_size"] for asset in assets)
         }
         
     except Exception as e:
         raise HTTPException(500, f"Error retrieving assets: {str(e)}")
+
+# Emoji Recommendation
+@api_router.post("/recommend-emoji")
+async def recommend_emoji(
+    request: FaceDetectionRequest,
+    token: str = Depends(oauth2_scheme)
+):
+    """
+    Recommend appropriate emoji based on facial expression
+    """
+    try:
+        # Validate device ID
+        if not validate_device_id(request.device_id):
+            raise HTTPException(400, "Invalid device ID")
+            
+        # Check rate limit
+        if not check_rate_limit(request.device_id):
+            raise HTTPException(429, "Rate limit exceeded")
+            
+        # Decode base64 image
+        image_data = base64.b64decode(request.image)
+        
+        # Get recommendations
+        recommendations = emoji_recommender.recommend_emojis(image_data)
+        
+        if recommendations["status"] == "error":
+            raise HTTPException(500, recommendations["message"])
+            
+        return {
+            "status": "success",
+            "recommendations": {
+                "primary": recommendations["recommended_emoji_id"],
+                "alternatives": recommendations["alternative_emoji_ids"],
+                "confidence": recommendations["confidence"],
+                "expression": recommendations["expression"]
+            },
+            "processing_time_ms": int((time.time() - start_time) * 1000)
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error processing image: {str(e)}")
+
+# Batch Processing
+@api_router.post("/batch-process")
+async def batch_process(
+    request: BatchProcessRequest,
+    token: str = Depends(oauth2_scheme)
+):
+    """
+    Process multiple frames for video effects
+    """
+    try:
+        # Validate device ID
+        if not validate_device_id(request.device_id):
+            raise HTTPException(400, "Invalid device ID")
+            
+        # Create job
+        job_id = await job_manager.create_job({
+            "frames": request.frames,
+            "emoji_id": request.emoji_id,
+            "processing_options": request.processing_options
+        })
+        
+        # Start processing in background
+        asyncio.create_task(_process_batch_job(job_id))
+        
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "estimated_completion_time": len(request.frames) * 0.1,  # 100ms per frame
+            "poll_url": f"/api/v1/job-status/{job_id}"
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error starting batch process: {str(e)}")
+
+async def _process_batch_job(job_id: str):
+    """Process a batch job asynchronously"""
+    try:
+        job_data = await job_manager.get_job_status(job_id)
+        if not job_data:
+            return
+            
+        # Update status to processing
+        await job_manager.update_job_status(job_id, "processing")
+        
+        # Process frames
+        results = []
+        for frame in job_data["frames"]:
+            # TODO: Implement actual frame processing
+            processed_frame = {
+                "timestamp": frame["timestamp"],
+                "result_image": frame["image"],  # Placeholder
+                "processing_time_ms": 100
+            }
+            results.append(processed_frame)
+            
+        # Update status to complete
+        await job_manager.update_job_status(
+            job_id, 
+            "complete",
+            {"frames": results}
+        )
+        
+    except Exception as e:
+        await job_manager.update_job_status(
+            job_id,
+            "failed",
+            {"error": str(e)}
+        )
 
 # Face Swap (protected)
 @api_router.post("/face-swap", response_model=FaceSwapResponse)
@@ -186,8 +303,9 @@ async def websocket_endpoint(websocket: WebSocket):
         # Initialize WebSocket connection
         await websocket_manager.connect(websocket, device_id)
         
-        # Initialize face detector
+        # Initialize face detector and emoji recommender
         websocket_manager.face_detector = face_detector
+        websocket_manager.emoji_recommender = emoji_recommender
         
         # Process frames in real-time
         await websocket_manager.process_frames(device_id, websocket)

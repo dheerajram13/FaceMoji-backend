@@ -1,22 +1,61 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile, Query, Body
+from fastapi import APIRouter, HTTPException, File, UploadFile, Query, Body, Depends
+from fastapi.security import OAuth2PasswordBearer
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.services.face_detector import face_detector
 from app.api.v1.schemas.face_detection import FaceDetectionRequest, FaceDetectionResponse
 from app.api.v1.schemas.emoji_assets import EmojiAssetsRequest, EmojiAssetsResponse
 from app.api.v1.schemas.face_swap import FaceSwapRequest, FaceSwapResponse
+from app.api.v1.auth import oauth2_scheme
 import io
 import base64
 import time
 
 api_router = APIRouter()
 
-# Face Detection
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Protected endpoints
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """Get current authenticated user"""
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM]
+        )
+        username: str = payload.get("sub")
+        if username is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        return username
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+# Face Detection (protected)
 @api_router.post("/face-detection", response_model=FaceDetectionResponse)
-async def face_detection(request: FaceDetectionRequest):
+async def face_detection(
+    request: FaceDetectionRequest,
+    token: str = Depends(oauth2_scheme)
+):
     """
     Real-time facial landmark detection and expression analysis
     """
     try:
+        # Validate device ID
+        if not validate_device_id(request.device_id):
+            raise HTTPException(400, "Invalid device ID")
+            
+        # Check rate limit
+        if not check_rate_limit(request.device_id):
+            raise HTTPException(429, "Rate limit exceeded")
+            
         start_time = time.time()
         
         # Decode base64 image
@@ -48,7 +87,7 @@ async def face_detection(request: FaceDetectionRequest):
     except Exception as e:
         raise HTTPException(500, f"Error processing image: {str(e)}")
 
-# Emoji Assets
+# Emoji Assets (public)
 @api_router.get("/emoji-assets", response_model=EmojiAssetsResponse)
 async def get_emoji_assets(request: EmojiAssetsRequest):
     """
@@ -78,13 +117,24 @@ async def get_emoji_assets(request: EmojiAssetsRequest):
     except Exception as e:
         raise HTTPException(500, f"Error retrieving assets: {str(e)}")
 
-# Face Swap
+# Face Swap (protected)
 @api_router.post("/face-swap", response_model=FaceSwapResponse)
-async def face_swap(request: FaceSwapRequest):
+async def face_swap(
+    request: FaceSwapRequest,
+    token: str = Depends(oauth2_scheme)
+):
     """
     Server-side face swapping for higher quality results
     """
     try:
+        # Validate device ID
+        if not validate_device_id(request.device_id):
+            raise HTTPException(400, "Invalid device ID")
+            
+        # Check rate limit
+        if not check_rate_limit(request.device_id):
+            raise HTTPException(429, "Rate limit exceeded")
+            
         start_time = time.time()
         
         # Decode base64 image
@@ -108,17 +158,29 @@ async def face_swap(request: FaceSwapRequest):
     except Exception as e:
         raise HTTPException(500, f"Error processing image: {str(e)}")
 
-# WebSocket for Real-time Processing
+# WebSocket for Real-time Processing (protected)
 @api_router.websocket("/websocket/live-processing")
 async def websocket_endpoint(websocket: WebSocket):
     """
     WebSocket endpoint for real-time face processing
     """
     try:
-        # Get device ID from query parameter
+        # Get device ID and token from query parameters
         device_id = websocket.query_params.get("device_id")
-        if not device_id:
+        token = websocket.query_params.get("token")
+        
+        if not device_id or not token:
             await websocket.close(code=4000)
+            return
+
+        # Validate device ID
+        if not validate_device_id(device_id):
+            await websocket.close(code=4000)
+            return
+            
+        # Check rate limit
+        if not check_rate_limit(device_id):
+            await websocket.close(code=4290)
             return
 
         # Initialize WebSocket connection
